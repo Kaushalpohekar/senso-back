@@ -399,7 +399,6 @@ exports.addDevice = async (req, res) => {
   try {
     const { company_id, role, zone_id: admin_zone_id } = req.user;
     const { device_uid, device_name, device_type_id, zone_id, widget_id } = req.body;
-
     if (!['Admin', 'Super Admin'].includes(role)) {
       return res.status(403).json({ message: 'Access denied' });
     }
@@ -447,11 +446,13 @@ exports.addDevice = async (req, res) => {
 exports.updateDevice = async (req, res) => {
   try {
     const { company_id, role } = req.user;
-    const { id, device_name, device_type_id, zone_id, status, widget_id } = req.body;
+    const { device_uid, device_name, device_type_id, zone_id, widget_id } = req.body;
+    const { id } = req.params;
 
     if (!['Admin', 'Super Admin'].includes(role)) {
       return res.status(403).json({ message: 'Access denied' });
     }
+
     if (!id) {
       return res.status(400).json({ message: 'Device ID is required' });
     }
@@ -459,12 +460,12 @@ exports.updateDevice = async (req, res) => {
     const validation = await db.query(
       `
       SELECT
-        (SELECT COUNT(*) FROM senso.senso_devices WHERE id = $1 AND company_id = $6) AS device_exists,
+        (SELECT COUNT(*) FROM senso.senso_devices WHERE id = $1 AND company_id = $5) AS device_exists,
         (SELECT COUNT(*) FROM senso.senso_device_types WHERE id = $2) AS type_exists,
-        (SELECT COUNT(*) FROM senso.senso_zones WHERE id = $3 AND company_id = $6) AS zone_exists,
-        (SELECT COUNT(*) FROM senso.senso_device_widgets WHERE id = $5) AS widget_exists
+        (SELECT COUNT(*) FROM senso.senso_zones WHERE id = $3 AND company_id = $5) AS zone_exists,
+        (SELECT COUNT(*) FROM senso.senso_device_widgets WHERE id = $4) AS widget_exists
       `,
-      [id, device_type_id, zone_id, null, widget_id || null, company_id]
+      [id, device_type_id, zone_id, widget_id || null, company_id]
     );
 
     const { device_exists, type_exists, zone_exists, widget_exists } = validation.rows[0];
@@ -477,11 +478,11 @@ exports.updateDevice = async (req, res) => {
     const result = await db.query(
       `
       UPDATE senso.senso_devices
-      SET device_name = $1, device_type_id = $2, zone_id = $3, status = $4, widget_id = $5
+      SET device_uid = $1, device_name = $2, device_type_id = $3, zone_id = $4, widget_id = $5
       WHERE id = $6 AND company_id = $7
-      RETURNING id, device_uid, device_name, device_type_id, zone_id, status, widget_id
+      RETURNING id, device_uid, device_name, device_type_id, zone_id, widget_id
       `,
-      [device_name || '', device_type_id, zone_id, status || 'offline', widget_id || null, id, company_id]
+      [device_uid, device_name || '', device_type_id, zone_id, widget_id || null, id, company_id]
     );
 
     res.status(200).json({ message: 'Device updated successfully', device: result.rows[0] });
@@ -490,6 +491,7 @@ exports.updateDevice = async (req, res) => {
     res.status(500).json({ message: 'Failed to update device', error: 'Internal Server Error' });
   }
 };
+
 
 exports.deleteDevice = async (req, res) => {
   try {
@@ -525,7 +527,7 @@ exports.getWidgetsByDevice = async (req, res) => {
       SELECT 
         id, widget_name, unit, width, length, diameter, tank_type, created_at
       FROM senso.senso_device_widgets
-      WHERE device_id = $1
+      WHERE device_type_id = $1
       ORDER BY created_at DESC
     `, [device_id]);
 
@@ -809,6 +811,90 @@ exports.getLatestTwoEntriesPerDevice = async (req, res) => {
   } catch (err) {
     logger.error(`[LATEST TWO ENTRIES ERROR] ${err.message}`);
     res.status(500).json({ message: 'Failed to fetch latest two entries', error: err.message });
+  }
+};
+
+exports.getDeviceDataWithBucket = async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const { deviceuid, start_date, end_date, bucket } = req.query;
+
+    if (!deviceuid || !start_date || !end_date || !bucket) {
+      return res.status(400).json({ message: 'deviceuid, start_date, end_date, and bucket are required' });
+    }
+
+    const allowedBuckets = [
+      5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60,
+      120, 180, 240, 300, 360, 420, 480, 540, 600, 660, 720,
+      'day'
+    ];
+
+    let parsedBucket = bucket === 'day' ? 'day' : parseInt(bucket, 10);
+
+    if (parsedBucket !== 'day' && (isNaN(parsedBucket) || parsedBucket <= 0)) {
+      return res.status(400).json({ message: 'Invalid bucket: must be positive integer or "day"' });
+    }
+
+    if (!allowedBuckets.includes(parsedBucket) && parsedBucket !== 'day') {
+      console.warn(`[CUSTOM BUCKET] Using custom bucket size: ${parsedBucket} minutes`);
+    }
+
+    const deviceCheck = await db.query(
+      `SELECT id FROM senso.senso_devices WHERE device_uid = $1 AND company_id = $2`,
+      [deviceuid, company_id]
+    );
+
+    if (deviceCheck.rowCount === 0) {
+      return res.status(403).json({ message: 'Unauthorized device access' });
+    }
+
+    let bucketSql, bucketLabel, params;
+    if (parsedBucket === 'day') {
+      bucketSql = `date_trunc('day', "timestamp")`;
+      bucketLabel = '1 day';
+      params = [deviceuid, start_date, end_date];
+    } else {
+      bucketSql = `
+        date_trunc('hour', "timestamp")
+        + floor((EXTRACT(epoch FROM "timestamp") / ($1 * 60))) * ($1 * interval '1 minute')
+      `;
+      bucketLabel = `${parsedBucket} minutes`;
+      params = [parsedBucket, deviceuid, start_date, end_date];
+    }
+
+    const result = await db.query(
+      `
+      SELECT 
+        TO_CHAR(
+          ${bucketSql},
+          'YYYY-MM-DD"T"HH24:MI:SS"Z"'
+        ) AS bucket_time,
+        ROUND(AVG(temperature)::numeric, 2) AS temperature,
+        ROUND(AVG(humidity)::numeric, 2) AS humidity,
+        ROUND(AVG(temperaturer)::numeric, 2) AS temperaturer,
+        ROUND(AVG(temperaturey)::numeric, 2) AS temperaturey,
+        ROUND(AVG(temperatureb)::numeric, 2) AS temperatureb,
+        ROUND(AVG(pressure)::numeric, 2) AS pressure,
+        ROUND(AVG(flowrate)::numeric, 2) AS flowrate,
+        MAX(totalvolume) AS totalvolume
+      FROM senso.senso_data
+      WHERE deviceuid = $2
+        AND "timestamp" BETWEEN $3 AND $4
+      GROUP BY bucket_time
+      ORDER BY bucket_time ASC
+      `,
+      params
+    );
+
+    res.status(200).json({
+      message: 'Data fetched successfully',
+      bucket_interval: bucketLabel,
+      count: result.rowCount,
+      data: result.rows
+    });
+  } catch (err) {
+    logger.error(`[BUCKET DATA FETCH ERROR] ${err.message}`);
+    res.status(500).json({ message: 'Failed to fetch data', error: err.message });
   }
 };
 

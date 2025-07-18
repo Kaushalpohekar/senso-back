@@ -24,7 +24,7 @@ router.delete('/device-types/:id', authenticateUser, adminController.deleteDevic
 /* ------------------- DEVICES ------------------- */
 router.get('/devices', authenticateUser, adminController.getDevicesFromTokenCompany);
 router.post('/devices', authenticateUser, adminController.addDevice);
-router.put('/devices', authenticateUser, adminController.updateDevice);
+router.put('/devices/:id', authenticateUser, adminController.updateDevice);
 router.delete('/devices/:id', authenticateUser, adminController.deleteDevice);
 
 /* ------------------- DEVICE WIDGETS ------------------- */
@@ -35,5 +35,5 @@ router.delete('/widgets/:id', authenticateUser, adminController.deleteWidget);
 
 router.get('/device-data', authenticateUser, adminController.getDeviceDataWithBucketing);
 router.get('/latest', authenticateUser, adminController.getLatestTwoEntriesPerDevice);
-
+router.get('/device-data/bucket', authenticateUser, adminController.getDeviceDataWithBucket);
 module.exports = router;
