@@ -373,11 +373,17 @@ exports.getDevicesFromTokenCompany = async (req, res) => {
           'length', w.length,
           'diameter', w.diameter,
           'tank_type', w.tank_type
-        ) AS widget
+        ) AS widget,
+        JSON_BUILD_OBJECT(
+          'id', u.id,
+          'name', CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))
+        ) AS assigned_to
       FROM senso.senso_devices d
       LEFT JOIN senso.senso_device_types dt ON dt.id = d.device_type_id
       LEFT JOIN senso.senso_zones z ON z.id = d.zone_id
       LEFT JOIN senso.senso_device_widgets w ON w.id = d.widget_id
+      LEFT JOIN senso.senso_device_users du ON du.device_id = d.id
+      LEFT JOIN senso.senso_users u ON u.id = du.user_id
       WHERE d.company_id = $1
       ORDER BY d.issue_date DESC
       `,
@@ -395,15 +401,18 @@ exports.getDevicesFromTokenCompany = async (req, res) => {
   }
 };
 
+
 exports.addDevice = async (req, res) => {
   try {
     const { company_id, role, zone_id: admin_zone_id } = req.user;
-    const { device_uid, device_name, device_type_id, zone_id, widget_id } = req.body;
+    const { device_uid, device_name, device_type_id, zone_id, widget_id, assignedTo } = req.body;
+
     if (!['Admin', 'Super Admin'].includes(role)) {
       return res.status(403).json({ message: 'Access denied' });
     }
-    if (!device_uid || !device_type_id) {
-      return res.status(400).json({ message: 'Device UID and type are required' });
+
+    if (!device_uid || !device_type_id || !assignedTo) {
+      return res.status(400).json({ message: 'Device UID, device type, and assigned user ID are required' });
     }
 
     const zoneToCheck = zone_id || admin_zone_id;
@@ -413,20 +422,26 @@ exports.addDevice = async (req, res) => {
       SELECT
         (SELECT COUNT(*) FROM senso.senso_devices WHERE device_uid = $1) AS device_exists,
         (SELECT COUNT(*) FROM senso.senso_device_types WHERE id = $2) AS type_exists,
-        (SELECT COUNT(*) FROM senso.senso_zones WHERE id = $3 AND company_id = $4) AS zone_exists,
-        (SELECT COUNT(*) FROM senso.senso_device_widgets WHERE id = $5) AS widget_exists
+        (SELECT COUNT(*) FROM senso.senso_zones WHERE id = $3 AND company_id = $5) AS zone_exists,
+        (SELECT COUNT(*) FROM senso.senso_device_widgets WHERE id = $4) AS widget_exists,
+        (SELECT user_type FROM senso.senso_users WHERE id = $6 AND company_id = $5) AS user_type
       `,
-      [device_uid, device_type_id, zoneToCheck, company_id, widget_id || null]
+      [device_uid, device_type_id, zoneToCheck, widget_id || null, company_id, assignedTo]
     );
 
-    const { device_exists, type_exists, zone_exists, widget_exists } = validation.rows[0];
+    const { device_exists, type_exists, zone_exists, widget_exists, user_type } = validation.rows[0];
 
     if (device_exists > 0) return res.status(409).json({ message: 'Device UID already exists' });
     if (type_exists === 0) return res.status(400).json({ message: 'Invalid device type ID' });
     if (zone_exists === 0) return res.status(400).json({ message: 'Invalid or unauthorized zone ID' });
     if (widget_id && widget_exists === 0) return res.status(400).json({ message: 'Invalid widget ID' });
+    if (!user_type) return res.status(400).json({ message: 'Invalid or unauthorized user ID' });
 
-    const result = await db.query(
+    const accessType = user_type === 'Standard' ? 'read' : 'write';
+
+    await db.query('BEGIN');
+
+    const deviceResult = await db.query(
       `
       INSERT INTO senso.senso_devices 
         (device_uid, device_name, company_id, zone_id, device_type_id, status, widget_id)
@@ -436,8 +451,26 @@ exports.addDevice = async (req, res) => {
       [device_uid, device_name || '', company_id, zoneToCheck, device_type_id, widget_id || null]
     );
 
-    res.status(201).json({ message: 'Device added successfully', device: result.rows[0] });
+    const device = deviceResult.rows[0];
+
+    await db.query(
+      `
+      INSERT INTO senso.senso_device_users 
+        (user_id, device_id, access_type)
+      VALUES ($1, $2, $3)
+      `,
+      [assignedTo, device.id, accessType]
+    );
+
+    await db.query('COMMIT');
+
+    res.status(201).json({
+      message: 'Device added successfully',
+      device,
+      assigned_user: { assignedTo, access_type: accessType }
+    });
   } catch (err) {
+    await db.query('ROLLBACK');
     logger.error(`[ADD DEVICE ERROR] ${err.message}`);
     res.status(500).json({ message: 'Failed to add device', error: 'Internal Server Error' });
   }
@@ -446,7 +479,7 @@ exports.addDevice = async (req, res) => {
 exports.updateDevice = async (req, res) => {
   try {
     const { company_id, role } = req.user;
-    const { device_uid, device_name, device_type_id, zone_id, widget_id } = req.body;
+    const { device_uid, device_name, device_type_id, zone_id, widget_id, user_id } = req.body;
     const { id } = req.params;
 
     if (!['Admin', 'Super Admin'].includes(role)) {
@@ -460,20 +493,24 @@ exports.updateDevice = async (req, res) => {
     const validation = await db.query(
       `
       SELECT
-        (SELECT COUNT(*) FROM senso.senso_devices WHERE id = $1 AND company_id = $5) AS device_exists,
+        (SELECT COUNT(*) FROM senso.senso_devices WHERE id = $1 AND company_id = $6) AS device_exists,
         (SELECT COUNT(*) FROM senso.senso_device_types WHERE id = $2) AS type_exists,
-        (SELECT COUNT(*) FROM senso.senso_zones WHERE id = $3 AND company_id = $5) AS zone_exists,
-        (SELECT COUNT(*) FROM senso.senso_device_widgets WHERE id = $4) AS widget_exists
+        (SELECT COUNT(*) FROM senso.senso_zones WHERE id = $3 AND company_id = $6) AS zone_exists,
+        (SELECT COUNT(*) FROM senso.senso_device_widgets WHERE id = $4) AS widget_exists,
+        (SELECT user_type FROM senso.senso_users WHERE id = $5 AND company_id = $6) AS user_type
       `,
-      [id, device_type_id, zone_id, widget_id || null, company_id]
+      [id, device_type_id, zone_id, widget_id || null, user_id || null, company_id]
     );
 
-    const { device_exists, type_exists, zone_exists, widget_exists } = validation.rows[0];
+    const { device_exists, type_exists, zone_exists, widget_exists, user_type } = validation.rows[0];
 
     if (device_exists === 0) return res.status(404).json({ message: 'Device not found or unauthorized' });
     if (type_exists === 0) return res.status(400).json({ message: 'Invalid device type ID' });
     if (zone_exists === 0) return res.status(400).json({ message: 'Invalid or unauthorized zone ID' });
     if (widget_id && widget_exists === 0) return res.status(400).json({ message: 'Invalid widget ID' });
+    if (user_id && !user_type) return res.status(400).json({ message: 'Invalid or unauthorized user ID' });
+
+    await db.query('BEGIN');
 
     const result = await db.query(
       `
@@ -485,13 +522,46 @@ exports.updateDevice = async (req, res) => {
       [device_uid, device_name || '', device_type_id, zone_id, widget_id || null, id, company_id]
     );
 
-    res.status(200).json({ message: 'Device updated successfully', device: result.rows[0] });
+    if (user_id) {
+      const accessType = user_type === 'Standard' ? 'read' : 'write';
+      const checkUserDevice = await db.query(
+        `SELECT COUNT(*) AS exists FROM senso.senso_device_users WHERE device_id = $1`,
+        [id]
+      );
+
+      if (parseInt(checkUserDevice.rows[0].exists) > 0) {
+        await db.query(
+          `
+          UPDATE senso.senso_device_users
+          SET user_id = $1, access_type = $2
+          WHERE device_id = $3
+          `,
+          [user_id, accessType, id]
+        );
+      } else {
+        await db.query(
+          `
+          INSERT INTO senso.senso_device_users (user_id, device_id, access_type)
+          VALUES ($1, $2, $3)
+          `,
+          [user_id, id, accessType]
+        );
+      }
+    }
+
+    await db.query('COMMIT');
+
+    res.status(200).json({
+      message: 'Device updated successfully',
+      device: result.rows[0],
+      assigned_user: user_id ? { user_id, access_type: user_type === 'Standard' ? 'read' : 'write' } : null
+    });
   } catch (err) {
+    await db.query('ROLLBACK');
     logger.error(`[UPDATE DEVICE ERROR] ${err.message}`);
     res.status(500).json({ message: 'Failed to update device', error: 'Internal Server Error' });
   }
 };
-
 
 exports.deleteDevice = async (req, res) => {
   try {
@@ -507,13 +577,21 @@ exports.deleteDevice = async (req, res) => {
       [id, company_id]
     );
 
-    if (validation.rows[0].device_exists === 0) {
+    if (parseInt(validation.rows[0].device_exists) === 0) {
       return res.status(404).json({ message: 'Device not found or unauthorized' });
     }
 
+    await db.query('BEGIN');
+
+    await db.query(`DELETE FROM senso.senso_device_users WHERE device_id = $1`, [id]);
+
     await db.query(`DELETE FROM senso.senso_devices WHERE id = $1 AND company_id = $2`, [id, company_id]);
+
+    await db.query('COMMIT');
+
     res.status(200).json({ message: 'Device deleted successfully' });
   } catch (err) {
+    await db.query('ROLLBACK');
     logger.error(`[DELETE DEVICE ERROR] ${err.message}`);
     res.status(500).json({ message: 'Failed to delete device', error: 'Internal Server Error' });
   }
@@ -897,5 +975,83 @@ exports.getDeviceDataWithBucket = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch data', error: err.message });
   }
 };
+
+
+exports.getDeviceConsumption = async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const { deviceuid, start_date, end_date } = req.query;
+
+    if (!deviceuid || !start_date || !end_date) {
+      return res.status(400).json({
+        message: 'deviceuid, start_date, and end_date are required'
+      });
+    }
+
+    const deviceCheck = await db.query(
+      `SELECT id FROM senso.senso_devices WHERE device_uid = $1 AND company_id = $2`,
+      [deviceuid, company_id]
+    );
+
+    if (deviceCheck.rowCount === 0) {
+      return res.status(403).json({ message: 'Unauthorized device access' });
+    }
+
+    const start = new Date(start_date);
+    const end = new Date(end_date);
+    const diffHours = (end - start) / (1000 * 60 * 60);
+    const diffDays = diffHours / 24;
+
+    let intervalMinutes, bucketLabel;
+    if (diffHours <= 1) {
+      intervalMinutes = 10;
+      bucketLabel = '10 minutes';
+    } else if (diffHours <= 24) {
+      intervalMinutes = 60;
+      bucketLabel = '1 hour';
+    } else if (diffDays <= 7) {
+      intervalMinutes = 1440;
+      bucketLabel = '1 day';
+    } else if (diffDays <= 45) {
+      intervalMinutes = 1440;
+      bucketLabel = '1 day';
+    } else {
+      intervalMinutes = 43200;
+      bucketLabel = '1 month';
+    }
+
+    const result = await db.query(
+      `
+      SELECT 
+        TO_CHAR(
+          date_trunc('hour', "timestamp")
+          + floor(EXTRACT(EPOCH FROM "timestamp") / ($1 * 60)) * ($1 || ' minutes')::interval,
+          'YYYY-MM-DD"T"HH24:MI:SS"Z"'
+        ) AS bucket_time,
+        COALESCE(MAX(totalvolume) - MIN(totalvolume), 0) AS consumption
+      FROM senso.senso_data
+      WHERE deviceuid = $2
+        AND "timestamp" BETWEEN $3 AND $4
+        AND totalvolume IS NOT NULL
+      GROUP BY bucket_time
+      ORDER BY bucket_time ASC
+      `,
+      [intervalMinutes, deviceuid, start_date, end_date]
+    );
+
+    console.log(result.rows);
+
+    res.status(200).json({
+      message: 'Consumption data fetched successfully',
+      bucket_interval: bucketLabel,
+      count: result.rowCount,
+      data: result.rows
+    });
+  } catch (err) {
+    logger.error(`[DEVICE CONSUMPTION ERROR] ${err.message}`);
+    res.status(500).json({ message: 'Failed to fetch consumption data', error: err.message });
+  }
+};
+
 
 

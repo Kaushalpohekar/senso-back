@@ -36,4 +36,6 @@ router.delete('/widgets/:id', authenticateUser, adminController.deleteWidget);
 router.get('/device-data', authenticateUser, adminController.getDeviceDataWithBucketing);
 router.get('/latest', authenticateUser, adminController.getLatestTwoEntriesPerDevice);
 router.get('/device-data/bucket', authenticateUser, adminController.getDeviceDataWithBucket);
+router.get('/device/consumption', authenticateUser, adminController.getDeviceConsumption);
+
 module.exports = router;

@@ -22,6 +22,7 @@ exports.login = async (req, res) => {
     }
 
     const user = result.rows[0];
+    console.log(user);
 
     if (user.blocked) {
       logger.warn(`[LOGIN BLOCKED] Blocked user attempted login: ${email}`);
@@ -76,18 +77,19 @@ exports.register = async (req, res) => {
   const client = await db.pool.connect();
 
   const {
-    company_name,
+    companyName,
     location,
-    contact_number,
-    official_email,
-    personal_email,
-    first_name,
-    last_name,
+    contact,
+    companyEmail,
+    personalEmail,
+    firstName,
+    lastName,
     designation,
     password
   } = req.body;
 
-  if (!company_name || !location || !contact_number || !official_email || !personal_email || !first_name || !last_name || !designation || !password) {
+
+  if (!companyName || !location || !contact || !companyEmail || !personalEmail || !firstName || !lastName || !designation || !password) {
     return res.status(400).json({ message: 'All fields are required' });
   }
 
@@ -100,7 +102,7 @@ exports.register = async (req, res) => {
       `INSERT INTO senso.senso_companies (company_name, location, official_email, contact_number)
        VALUES ($1, $2, $3, $4)
        RETURNING id`,
-      [company_name, location, official_email, contact_number]
+      [companyName, location, companyEmail, contact]
     );
 
     const company_id = companyRes.rows[0].id;
@@ -118,10 +120,10 @@ exports.register = async (req, res) => {
       `INSERT INTO senso.senso_users 
        (username, first_name, last_name, email, password, contact_number, designation, user_type, verified, blocked, company_id, zone_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'Admin', false, false, $8, $9)`,
-      [personal_email, first_name, last_name, personal_email, hashedPassword, contact_number, designation, company_id, zone_id]
+      [personalEmail, firstName, lastName, personalEmail, hashedPassword, contact, designation, company_id, zone_id]
     );
 
-    const verificationToken = await generateToken({ email: personal_email }, { expiresIn: '12h' });
+    const verificationToken = await generateToken({ email: personalEmail }, { expiresIn: '12h' });
 
     await client.query('COMMIT');
     res.status(201).json({ message: 'Registration successful. Please verify your email.', token: verificationToken });
