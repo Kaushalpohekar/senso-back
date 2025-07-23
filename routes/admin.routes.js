@@ -37,5 +37,7 @@ router.get('/device-data', authenticateUser, adminController.getDeviceDataWithBu
 router.get('/latest', authenticateUser, adminController.getLatestTwoEntriesPerDevice);
 router.get('/device-data/bucket', authenticateUser, adminController.getDeviceDataWithBucket);
 router.get('/device/consumption', authenticateUser, adminController.getDeviceConsumption);
-
+router.get('/device/summary', authenticateUser, adminController.getDeviceSummary);
+router.get('/device/calculation-configs', authenticateUser, adminController.getDeviceCalculationConfigs);
+router.get('/device/summaryConsumption', authenticateUser, adminController.getDeviceConsumptionSummary);
 module.exports = router;

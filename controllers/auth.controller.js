@@ -22,7 +22,6 @@ exports.login = async (req, res) => {
     }
 
     const user = result.rows[0];
-    console.log(user);
 
     if (user.blocked) {
       logger.warn(`[LOGIN BLOCKED] Blocked user attempted login: ${email}`);
