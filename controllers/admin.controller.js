@@ -190,7 +190,8 @@ exports.addZone = async (req, res) => {
 exports.updateZone = async (req, res) => {
   try {
     const { company_id, role } = req.user;
-    const { id, zone_name } = req.body;
+    const { id } = req.params;
+    const { zone_name } = req.body;
 
     if (!['Admin', 'Super Admin'].includes(role)) {
       return res.status(403).json({ message: 'Access denied' });
@@ -200,12 +201,13 @@ exports.updateZone = async (req, res) => {
       return res.status(400).json({ message: 'Zone ID and new name are required' });
     }
 
-    const result = await db.query(`
-      UPDATE senso.senso_zones
-      SET zone_name = $1
-      WHERE id = $2 AND company_id = $3
-      RETURNING id, zone_name, created_at
-    `, [zone_name, id, company_id]);
+    const result = await db.query(
+      `UPDATE senso.senso_zones
+       SET zone_name = $1
+       WHERE id = $2 AND company_id = $3
+       RETURNING id, zone_name, created_at`,
+      [zone_name, id, company_id]
+    );
 
     if (result.rowCount === 0) {
       return res.status(404).json({ message: 'Zone not found or unauthorized' });
@@ -448,7 +450,6 @@ exports.getDevicesFromTokenCompany = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch devices', error: 'Internal Server Error' });
   }
 };
-
 
 
 exports.addDevice = async (req, res) => {
@@ -699,7 +700,6 @@ exports.updateDevice = async (req, res) => {
     client.release();
   }
 };
-
 
 
 exports.deleteDevice = async (req, res) => {
@@ -1095,7 +1095,9 @@ exports.getDeviceDataWithBucket = async (req, res) => {
         ROUND(AVG(temperatureb)::numeric, 2) AS temperatureb,
         ROUND(AVG(pressure)::numeric, 2) AS pressure,
         ROUND(AVG(flowrate)::numeric, 2) AS flowrate,
-        MAX(totalvolume) AS totalvolume
+        MAX(totalvolume) AS totalvolume,
+        MIN(totalvolume) AS min_totalvolume,
+        MAX(totalvolume) - MIN(totalvolume) AS volume_change
       FROM senso.senso_data
       WHERE deviceuid = $2
         AND "timestamp" BETWEEN $3 AND $4
@@ -1116,7 +1118,6 @@ exports.getDeviceDataWithBucket = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch data', error: err.message });
   }
 };
-
 
 exports.getDeviceConsumption = async (req, res) => {
   try {
@@ -1533,6 +1534,247 @@ exports.getDeviceConsumptionSummary = async (req, res) => {
       message: 'Failed to fetch device consumption summary',
       error: err.message
     });
+  }
+};
+
+exports.getAlerts = async (req, res) => {
+  try {
+    const { company_id } = req.user;
+
+    const result = await db.query(
+      `SELECT 
+          n.id,
+          n.device_id,
+          d.device_name,
+          n.alert_name,
+          n.enabled,
+          n.interval_minutes,
+          n.notify_email,
+          n.notify_whatsapp,
+          n.notify_sms,
+          n.threshold_type,
+          n.condition,
+          n.threshold_value,
+          u.id AS responsible_user_id,
+          CONCAT(u.first_name, ' ', u.last_name) AS responsible_name,
+          u.email AS responsible_email
+       FROM senso.senso_device_notifications n
+       INNER JOIN senso.senso_devices d ON n.device_id = d.id
+       LEFT JOIN senso.senso_device_users du ON du.device_id = d.id
+       LEFT JOIN senso.senso_users u ON du.user_id = u.id
+       WHERE d.company_id = $1
+       ORDER BY d.device_name ASC`,
+      [company_id]
+    );
+
+    const alertsMap = new Map();
+
+    result.rows.forEach(row => {
+      const key = `${row.device_id}_${row.alert_name || ''}`;
+
+      if (!alertsMap.has(key)) {
+        alertsMap.set(key, {
+          id: row.id, // first row's id, for reference
+          alert_name: row.alert_name || `Alert for ${row.device_name}`,
+          device_id: row.device_id,
+          device_name: row.device_name,
+          enabled: row.enabled,
+          interval_minutes: row.interval_minutes,
+          notify_email: row.notify_email,
+          notify_whatsapp: row.notify_whatsapp,
+          notify_sms: row.notify_sms,
+          responsible: row.responsible_user_id
+            ? {
+                id: row.responsible_user_id,
+                name: row.responsible_name,
+                email: row.responsible_email
+              }
+            : null,
+          thresholds: []
+        });
+      }
+
+      alertsMap.get(key).thresholds.push({
+        telemetry: row.threshold_type,
+        condition: row.condition,
+        value: row.threshold_value
+      });
+    });
+
+    res.status(200).json({
+      message: 'Alerts fetched successfully',
+      alerts: Array.from(alertsMap.values())
+    });
+  } catch (err) {
+    logger.error(`[GET ALERTS ERROR] ${err.message}`);
+    res.status(500).json({ message: 'Failed to fetch alerts', error: 'Internal Server Error' });
+  }
+};
+
+exports.addAlert = async (req, res) => {
+  try {
+    const { company_id, role } = req.user;
+    const {
+      device_id,
+      alert_name,
+      enabled,
+      interval_minutes,
+      notify_email,
+      notify_whatsapp,
+      notify_sms,
+      thresholds
+    } = req.body;
+
+    if (!['Admin', 'Super Admin', 'Manager'].includes(role))
+      return res.status(403).json({ message: 'Access denied' });
+
+    if (!device_id || !Array.isArray(thresholds) || thresholds.length === 0)
+      return res.status(400).json({ message: 'Missing required fields' });
+
+    const deviceCheck = await db.query(
+      `SELECT id FROM senso.senso_devices WHERE id = $1 AND company_id = $2`,
+      [device_id, company_id]
+    );
+    if (deviceCheck.rowCount === 0)
+      return res.status(404).json({ message: 'Device not found or unauthorized' });
+
+    const inserted = [];
+    for (const t of thresholds) {
+      if (!t.threshold_type || !t.condition || t.threshold_value === undefined) continue;
+
+      const exists = await db.query(
+        `SELECT id FROM senso.senso_device_notifications
+         WHERE device_id = $1 AND threshold_type = $2 AND condition = $3 AND threshold_value = $4`,
+        [device_id, t.threshold_type, t.condition, t.threshold_value]
+      );
+      if (exists.rowCount > 0) continue;
+
+      const result = await db.query(
+        `INSERT INTO senso.senso_device_notifications
+         (device_id, alert_name, enabled, threshold_type, condition, threshold_value, interval_minutes,
+          notify_email, notify_whatsapp, notify_sms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, device_id, alert_name, enabled, threshold_type, condition, threshold_value,
+                   interval_minutes, notify_email, notify_whatsapp, notify_sms`,
+        [
+          device_id,
+          alert_name,
+          enabled ?? false,
+          t.threshold_type,
+          t.condition,
+          t.threshold_value,
+          interval_minutes ?? 0,
+          notify_email ?? false,
+          notify_whatsapp ?? false,
+          notify_sms ?? false
+        ]
+      );
+      inserted.push(result.rows[0]);
+    }
+
+    res.status(201).json({ message: 'Alert(s) added successfully', alerts: inserted });
+  } catch (err) {
+    logger.error(`[ADD ALERT ERROR] ${err.message}`);
+    res.status(500).json({ message: 'Failed to add alert', error: 'Internal Server Error' });
+  }
+};
+
+exports.updateAlert = async (req, res) => {
+  try {
+    const { company_id, role } = req.user;
+    const { id } = req.params; // can be any one threshold ID (used to identify device & alert_name)
+    const {
+      alert_name,
+      enabled,
+      interval_minutes,
+      notify_email,
+      notify_whatsapp,
+      notify_sms,
+      thresholds
+    } = req.body;
+
+    if (!['Admin', 'Super Admin', 'Manager'].includes(role))
+      return res.status(403).json({ message: 'Access denied' });
+
+    if (!id || !Array.isArray(thresholds) || thresholds.length === 0)
+      return res.status(400).json({ message: 'Missing required fields' });
+
+    const alertRow = await db.query(
+      `SELECT device_id FROM senso.senso_device_notifications n
+       INNER JOIN senso.senso_devices d ON n.device_id = d.id
+       WHERE n.id = $1 AND d.company_id = $2`,
+      [id, company_id]
+    );
+    if (alertRow.rowCount === 0)
+      return res.status(404).json({ message: 'Alert not found or unauthorized' });
+
+    const device_id = alertRow.rows[0].device_id;
+
+    await db.query(
+      `DELETE FROM senso.senso_device_notifications WHERE device_id = $1 AND alert_name = $2`,
+      [device_id, alert_name]
+    );
+
+    const updatedAlerts = [];
+    for (const t of thresholds) {
+      const result = await db.query(
+        `INSERT INTO senso.senso_device_notifications
+         (device_id, alert_name, enabled, threshold_type, condition, threshold_value, interval_minutes,
+          notify_email, notify_whatsapp, notify_sms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, device_id, alert_name, enabled, threshold_type, condition, threshold_value,
+                   interval_minutes, notify_email, notify_whatsapp, notify_sms`,
+        [
+          device_id,
+          alert_name,
+          enabled ?? false,
+          t.threshold_type,
+          t.condition,
+          t.threshold_value,
+          interval_minutes ?? 0,
+          notify_email ?? false,
+          notify_whatsapp ?? false,
+          notify_sms ?? false
+        ]
+      );
+      updatedAlerts.push(result.rows[0]);
+    }
+
+    res.status(200).json({ message: 'Alert updated successfully', alerts: updatedAlerts });
+  } catch (err) {
+    logger.error(`[UPDATE ALERT ERROR] ${err.message}`);
+    res.status(500).json({ message: 'Failed to update alert', error: 'Internal Server Error' });
+  }
+};
+
+exports.deleteAlert = async (req, res) => {
+  try {
+    const { company_id, role } = req.user;
+    const { id } = req.params; // any threshold row id
+
+    if (!['Admin', 'Super Admin'].includes(role))
+      return res.status(403).json({ message: 'Access denied' });
+
+    const alertRow = await db.query(
+      `SELECT device_id, alert_name FROM senso.senso_device_notifications n
+       INNER JOIN senso.senso_devices d ON n.device_id = d.id
+       WHERE n.id = $1 AND d.company_id = $2`,
+      [id, company_id]
+    );
+    if (alertRow.rowCount === 0)
+      return res.status(404).json({ message: 'Alert not found or unauthorized' });
+
+    const { device_id, alert_name } = alertRow.rows[0];
+
+    await db.query(
+      `DELETE FROM senso.senso_device_notifications WHERE device_id = $1 AND alert_name = $2`,
+      [device_id, alert_name]
+    );
+
+    res.status(200).json({ message: 'Alert deleted successfully' });
+  } catch (err) {
+    logger.error(`[DELETE ALERT ERROR] ${err.message}`);
+    res.status(500).json({ message: 'Failed to delete alert', error: 'Internal Server Error' });
   }
 };
 
