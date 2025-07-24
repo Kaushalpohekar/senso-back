@@ -17,7 +17,7 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 10000 }));
 app.use(morgan('combined', { stream: logger.stream }));
 require('./crons/status');
 
-app.use('/api/auth', require('./routes/auth.routes'));
-app.use('/api/data', require('./routes/admin.routes'));
+app.use('/senso-back/auth', require('./routes/auth.routes'));
+app.use('/senso-back/data', require('./routes/admin.routes'));
 
 module.exports = app;
