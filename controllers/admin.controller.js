@@ -1083,27 +1083,38 @@ exports.getDeviceDataWithBucket = async (req, res) => {
 
     const result = await db.query(
       `
-      SELECT 
-        TO_CHAR(
-          ${bucketSql},
-          'YYYY-MM-DD"T"HH24:MI:SS"Z"'
-        ) AS bucket_time,
-        ROUND(AVG(temperature)::numeric, 2) AS temperature,
-        ROUND(AVG(humidity)::numeric, 2) AS humidity,
-        ROUND(AVG(temperaturer)::numeric, 2) AS temperaturer,
-        ROUND(AVG(temperaturey)::numeric, 2) AS temperaturey,
-        ROUND(AVG(temperatureb)::numeric, 2) AS temperatureb,
-        ROUND(AVG(pressure)::numeric, 2) AS pressure,
-        ROUND(AVG(flowrate)::numeric, 2) AS flowrate,
-        MAX(totalvolume) AS totalvolume,
-        MIN(totalvolume) AS min_totalvolume,
-        MAX(totalvolume) - MIN(totalvolume) AS volume_change
-      FROM senso.senso_data
-      WHERE deviceuid = $2
-        AND "timestamp" BETWEEN $3 AND $4
-      GROUP BY bucket_time
-      ORDER BY bucket_time ASC
-      `,
+        WITH bucketed AS (
+          SELECT
+            ${bucketSql} AS bucket_time,
+            ROUND(AVG(temperature)::numeric, 2) AS temperature,
+            ROUND(AVG(humidity)::numeric, 2) AS humidity,
+            ROUND(AVG(temperaturer)::numeric, 2) AS temperaturer,
+            ROUND(AVG(temperaturey)::numeric, 2) AS temperaturey,
+            ROUND(AVG(temperatureb)::numeric, 2) AS temperatureb,
+            ROUND(AVG(pressure)::numeric, 2) AS pressure,
+            ROUND(AVG(flowrate)::numeric, 2) AS flowrate,
+            MAX(totalvolume) AS totalvolume,
+            MIN(totalvolume) AS min_totalvolume_raw
+          FROM senso.senso_data
+          WHERE deviceuid = $2
+            AND "timestamp" BETWEEN $3 AND $4
+          GROUP BY bucket_time
+        )
+        SELECT
+          TO_CHAR(bucket_time, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS bucket_time,
+          temperature,
+          humidity,
+          temperaturer,
+          temperaturey,
+          temperatureb,
+          pressure,
+          flowrate,
+          totalvolume,
+          COALESCE(LAG(totalvolume) OVER (ORDER BY bucket_time), min_totalvolume_raw) AS min_totalvolume,
+          totalvolume - COALESCE(LAG(totalvolume) OVER (ORDER BY bucket_time), min_totalvolume_raw) AS volume_change
+        FROM bucketed
+        ORDER BY bucket_time ASC
+        `,
       params
     );
 
@@ -1585,10 +1596,10 @@ exports.getAlerts = async (req, res) => {
           notify_sms: row.notify_sms,
           responsible: row.responsible_user_id
             ? {
-                id: row.responsible_user_id,
-                name: row.responsible_name,
-                email: row.responsible_email
-              }
+              id: row.responsible_user_id,
+              name: row.responsible_name,
+              email: row.responsible_email
+            }
             : null,
           thresholds: []
         });
