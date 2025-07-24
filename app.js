@@ -17,6 +17,10 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 10000 }));
 app.use(morgan('combined', { stream: logger.stream }));
 require('./crons/status');
 
+app.use('/senso-back', (req, res, next) => {
+  next();
+});
+
 app.use('/senso-back/auth', require('./routes/auth.routes'));
 app.use('/senso-back/data', require('./routes/admin.routes'));
 
