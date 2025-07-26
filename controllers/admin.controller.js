@@ -985,14 +985,19 @@ exports.getDeviceDataWithBucketing = async (req, res) => {
     let intervalMinutes = 1;
     let tableName = "senso.senso_data";
 
-    if (diffDays <= 1) intervalMinutes = diffHours <= 1 ? 1 : 5;
-    else if (diffDays <= 7) intervalMinutes = 30;
-    else if (diffDays <= 45) {
+    if (diffDays <= 1) {
+      intervalMinutes = diffHours <= 1 ? 1 : 5;
+    } else if (diffDays <= 7) {
+      intervalMinutes = 30;
+    } else if (diffDays <= 45) {
       tableName = "senso.senso_data_30_min";
       intervalMinutes = 30;
-    } else {
+    } else if (diffDays <= 180) { 
       tableName = "senso.senso_data_30_min";
       intervalMinutes = 60;
+    } else { 
+      tableName = "senso.senso_data_30_min";
+      intervalMinutes = 120;
     }
 
     const query = `
