@@ -2,7 +2,7 @@ const db = require('../config/db');
 const logger = require('../utils/logger');
 const cron = require('node-cron');
 
-cron.schedule('*/5 * * * * *', async () => {
+cron.schedule('*/10 * * * * *', async () => {
   try {
     logger.info('[CRON] Running optimized device status updater...');
     await db.query(`

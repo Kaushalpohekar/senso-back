@@ -15,7 +15,7 @@ app.use(cookieParser());
 app.use(sanitize);
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 10000 }));
 app.use(morgan('combined', { stream: logger.stream }));
-require('./crons/status');
+require('./controllers/store');
 
 app.use('/senso-back', (req, res, next) => {
   next();
