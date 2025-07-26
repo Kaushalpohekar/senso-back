@@ -1047,8 +1047,7 @@ exports.getDeviceDataWithBucket = async (req, res) => {
 
     const allowedBuckets = [
       1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60,
-      120, 180, 240, 300, 360, 420, 480, 540, 600, 660, 720,
-      'day'
+      120, 180, 240, 300, 360, 420, 480, 540, 600, 660, 720, 'day'
     ];
 
     let parsedBucket = bucket === 'day' ? 'day' : parseInt(bucket, 10);
@@ -1070,7 +1069,7 @@ exports.getDeviceDataWithBucket = async (req, res) => {
 
     let tableName = "senso.senso_data";
 
-    // ✅ Rule: If range >30 days → only 30 min or more allowed
+    // ✅ Strict rule for >30 days
     if (diffDays > 30) {
       if (parsedBucket !== 'day' && parsedBucket < 30) {
         return res.status(400).json({
@@ -1079,11 +1078,9 @@ exports.getDeviceDataWithBucket = async (req, res) => {
       }
       tableName = "senso.senso_data_30_min";
     } else {
-      if (parsedBucket === 'day' || parsedBucket >= 30) {
-        tableName = "senso.senso_data_30_min";
-      } else {
-        tableName = "senso.senso_data";
-      }
+      tableName = (parsedBucket === 'day' || parsedBucket >= 30)
+        ? "senso.senso_data_30_min"
+        : "senso.senso_data";
     }
 
     let bucketSql, bucketLabel, params;
@@ -1095,7 +1092,7 @@ exports.getDeviceDataWithBucket = async (req, res) => {
     } else {
       bucketSql = `
         date_trunc('hour', "timestamp")
-        + floor((EXTRACT(minute FROM "timestamp") / $1)) * ($1 * interval '1 minute')
+        + floor(EXTRACT(epoch FROM "timestamp") / ($1 * 60)) * ($1 * interval '1 minute')
       `;
       bucketLabel = `${parsedBucket} minutes`;
       params = [parsedBucket, deviceuid, start_date, end_date];
@@ -1151,8 +1148,6 @@ exports.getDeviceDataWithBucket = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch data', error: err.message });
   }
 };
-
-
 
 exports.getDeviceConsumption = async (req, res) => {
   try {
