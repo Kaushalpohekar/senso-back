@@ -887,9 +887,81 @@ exports.deleteWidget = async (req, res) => {
   }
 };
 
+// exports.getDeviceDataWithBucketing = async (req, res) => {
+//   try {
+//     //console.time("TOTAL_API_TIME");
+//     const { company_id } = req.user;
+//     const { deviceuid, start_date, end_date } = req.query;
+
+//     if (!deviceuid || !start_date || !end_date) {
+//       return res.status(400).json({ message: 'deviceuid, start_date, and end_date are required' });
+//     }
+
+//     //console.time("DEVICE_CHECK");
+//     const deviceCheck = await db.query(
+//       `SELECT id FROM senso.senso_devices WHERE device_uid = $1 AND company_id = $2`,
+//       [deviceuid, company_id]
+//     );
+//     //console.timeEnd("DEVICE_CHECK");
+
+//     if (deviceCheck.rowCount === 0) {
+//       return res.status(403).json({ message: 'Unauthorized device access' });
+//     }
+
+//     const start = new Date(start_date);
+//     const end = new Date(end_date);
+//     const diffHours = (end - start) / (1000 * 60 * 60);
+
+//     let intervalMinutes = 1;
+//     if (diffHours <= 1) intervalMinutes = 1;
+//     else if (diffHours <= 12) intervalMinutes = 5;
+//     else if (diffHours <= 24) intervalMinutes = 5;
+//     else if (diffHours <= 168) intervalMinutes = 30;
+//     else if (diffHours <= 720) intervalMinutes = 60;
+//     else intervalMinutes = 120;
+
+//     //console.time("DB_QUERY");
+//     const result = await db.query(
+//       `
+//       SELECT
+//         TO_CHAR(
+//           date_trunc('hour', "timestamp")
+//           + floor((EXTRACT(minute FROM "timestamp") / $1)) * ($1 * interval '1 minute'),
+//           'YYYY-MM-DD"T"HH24:MI:SS"Z"'
+//         ) AS bucket_time,
+//         ROUND(AVG(temperature)::numeric, 2) AS temperature,
+//         ROUND(AVG(humidity)::numeric, 2) AS humidity,
+//         ROUND(AVG(temperaturer)::numeric, 2) AS temperaturer,
+//         ROUND(AVG(temperaturey)::numeric, 2) AS temperaturey,
+//         ROUND(AVG(temperatureb)::numeric, 2) AS temperatureb,
+//         ROUND(AVG(pressure)::numeric, 2) AS pressure,
+//         ROUND(AVG(flowrate)::numeric, 2) AS flowrate,
+//         MAX(totalvolume) AS totalvolume
+//       FROM senso.senso_data
+//       WHERE deviceuid = $2
+//         AND "timestamp" BETWEEN $3 AND $4
+//       GROUP BY bucket_time
+//       ORDER BY bucket_time ASC
+//       `,
+//       [intervalMinutes, deviceuid, start_date, end_date]
+//     );
+//     //console.timeEnd("DB_QUERY");
+
+//     res.status(200).json({
+//       message: 'Data fetched successfully',
+//       bucket_interval: `${intervalMinutes} minutes`,
+//       count: result.rowCount,
+//       data: result.rows
+//     });
+
+//     // console.timeEnd("TOTAL_API_TIME");
+//   } catch (err) {
+//     logger.error(`[DATA FETCH ERROR] ${err.message}`);
+//     res.status(500).json({ message: 'Failed to fetch data', error: err.message });
+//   }
+// };
 exports.getDeviceDataWithBucketing = async (req, res) => {
   try {
-    //console.time("TOTAL_API_TIME");
     const { company_id } = req.user;
     const { deviceuid, start_date, end_date } = req.query;
 
@@ -897,13 +969,10 @@ exports.getDeviceDataWithBucketing = async (req, res) => {
       return res.status(400).json({ message: 'deviceuid, start_date, and end_date are required' });
     }
 
-    //console.time("DEVICE_CHECK");
     const deviceCheck = await db.query(
       `SELECT id FROM senso.senso_devices WHERE device_uid = $1 AND company_id = $2`,
       [deviceuid, company_id]
     );
-    //console.timeEnd("DEVICE_CHECK");
-
     if (deviceCheck.rowCount === 0) {
       return res.status(403).json({ message: 'Unauthorized device access' });
     }
@@ -911,18 +980,22 @@ exports.getDeviceDataWithBucketing = async (req, res) => {
     const start = new Date(start_date);
     const end = new Date(end_date);
     const diffHours = (end - start) / (1000 * 60 * 60);
+    const diffDays = diffHours / 24;
 
     let intervalMinutes = 1;
-    if (diffHours <= 1) intervalMinutes = 1;
-    else if (diffHours <= 12) intervalMinutes = 5;
-    else if (diffHours <= 24) intervalMinutes = 5;
-    else if (diffHours <= 168) intervalMinutes = 30;
-    else if (diffHours <= 720) intervalMinutes = 60;
-    else intervalMinutes = 120;
+    let tableName = "senso.senso_data";
 
-    //console.time("DB_QUERY");
-    const result = await db.query(
-      `
+    if (diffDays <= 1) intervalMinutes = diffHours <= 1 ? 1 : 5;
+    else if (diffDays <= 7) intervalMinutes = 30;
+    else if (diffDays <= 45) {
+      tableName = "senso.senso_data_30_min";
+      intervalMinutes = 30;
+    } else {
+      tableName = "senso.senso_data_30_min";
+      intervalMinutes = 60;
+    }
+
+    const query = `
       SELECT
         TO_CHAR(
           date_trunc('hour', "timestamp")
@@ -937,24 +1010,23 @@ exports.getDeviceDataWithBucketing = async (req, res) => {
         ROUND(AVG(pressure)::numeric, 2) AS pressure,
         ROUND(AVG(flowrate)::numeric, 2) AS flowrate,
         MAX(totalvolume) AS totalvolume
-      FROM senso.senso_data
+      FROM ${tableName}
       WHERE deviceuid = $2
         AND "timestamp" BETWEEN $3 AND $4
       GROUP BY bucket_time
       ORDER BY bucket_time ASC
-      `,
-      [intervalMinutes, deviceuid, start_date, end_date]
-    );
-    //console.timeEnd("DB_QUERY");
+    `;
+
+    const result = await db.query(query, [intervalMinutes, deviceuid, start_date, end_date]);
 
     res.status(200).json({
       message: 'Data fetched successfully',
+      table_used: tableName,
       bucket_interval: `${intervalMinutes} minutes`,
       count: result.rowCount,
       data: result.rows
     });
 
-    // console.timeEnd("TOTAL_API_TIME");
   } catch (err) {
     logger.error(`[DATA FETCH ERROR] ${err.message}`);
     res.status(500).json({ message: 'Failed to fetch data', error: err.message });
