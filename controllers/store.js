@@ -41,9 +41,26 @@ function getUniversalValue(data, names) {
 }
 
 const localSystemIp = getLocalIpAddress();
-const deviceCache = new Map();
 const insertQueue = [];
+const insertTracker = new Map();
 let isFlushing = false;
+
+function shouldInsertNow(deviceUID) {
+  const now = Date.now();
+  if (!insertTracker.has(deviceUID)) {
+    insertTracker.set(deviceUID, { lastInserted: now });
+    return true;
+  }
+
+  const record = insertTracker.get(deviceUID);
+  if (now - record.lastInserted >= 60000) {
+    record.lastInserted = now;
+    insertTracker.set(deviceUID, record);
+    return true;
+  }
+
+  return false;
+}
 
 async function flushInsertQueue() {
   if (isFlushing || insertQueue.length === 0) return;
@@ -72,6 +89,7 @@ async function flushInsertQueue() {
   } catch (err) {
     console.error(`❌ Batch Insert Error: ${err.message}`);
   }
+
   isFlushing = false;
 }
 
@@ -106,6 +124,7 @@ mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message);
     const devices = [];
+
     if (payload.DeviceUID) devices.push(payload);
     for (const key in payload) {
       const val = payload[key];
@@ -114,64 +133,27 @@ mqttClient.on('message', async (topic, message) => {
       }
     }
 
-    const now = Date.now();
-
     for (const data of devices) {
       const deviceUID = getUniversalValue(data, ['DeviceUID']);
       if (!deviceUID) continue;
 
-      const insertValues = [
-        deviceUID.trim(),
-        getUniversalValue(data, ['Temperature']),
-        getUniversalValue(data, ['TemperatureR', 'Temp1']),
-        getUniversalValue(data, ['TemperatureY', 'Temp2']),
-        getUniversalValue(data, ['TemperatureB', 'Temp3']),
-        getUniversalValue(data, ['Humidity']),
-        getUniversalValue(data, ['FlowRate', 'flow_rate', 'Level', 'level']),
-        getUniversalValue(data, ['Pressure']),
-        getUniversalValue(data, ['Totalizer', 'TotalVolume']),
-        data.LocalIP || localSystemIp,
-        'online'
-      ];
-
-      let cacheEntry = deviceCache.get(deviceUID);
-
-      if (!cacheEntry) {
-        cacheEntry = {
-          lastInsert: 0,
-          offlineTimer: null,
-          lastSeenTimestamps: []
-        };
-      }
-
-      cacheEntry.lastSeenTimestamps.push(now);
-      if (cacheEntry.lastSeenTimestamps.length > 5)
-        cacheEntry.lastSeenTimestamps.shift();
-
-      let avgInterval = 0;
-      if (cacheEntry.lastSeenTimestamps.length >= 2) {
-        let totalGap = 0;
-        for (let i = 1; i < cacheEntry.lastSeenTimestamps.length; i++) {
-          totalGap += cacheEntry.lastSeenTimestamps[i] - cacheEntry.lastSeenTimestamps[i - 1];
-        }
-        avgInterval = totalGap / (cacheEntry.lastSeenTimestamps.length - 1);
-      }
-
-      const minInsertInterval = avgInterval < 30000 ? 60000 : 1000;
-
-      if (now - cacheEntry.lastInsert >= minInsertInterval) {
+      if (shouldInsertNow(deviceUID)) {
+        const insertValues = [
+          deviceUID.trim(),
+          getUniversalValue(data, ['Temperature']),
+          getUniversalValue(data, ['TemperatureR', 'Temp1']),
+          getUniversalValue(data, ['TemperatureY', 'Temp2']),
+          getUniversalValue(data, ['TemperatureB', 'Temp3']),
+          getUniversalValue(data, ['Humidity']),
+          getUniversalValue(data, ['FlowRate', 'flow_rate', 'Level', 'level']),
+          getUniversalValue(data, ['Pressure']),
+          getUniversalValue(data, ['Totalizer', 'TotalVolume']),
+          data.LocalIP || localSystemIp,
+          'online'
+        ];
         insertQueue.push({ values: insertValues });
-        cacheEntry.lastInsert = now;
         await updateDeviceStatus(deviceUID, 'online');
       }
-
-      if (cacheEntry.offlineTimer) clearTimeout(cacheEntry.offlineTimer);
-      cacheEntry.offlineTimer = setTimeout(async () => {
-        await updateDeviceStatus(deviceUID, 'offline');
-        deviceCache.delete(deviceUID);
-      }, 30 * 60 * 1000);
-
-      deviceCache.set(deviceUID, cacheEntry);
     }
   } catch (err) {
     console.error(`❌ Handler Error: ${err.message}`);
