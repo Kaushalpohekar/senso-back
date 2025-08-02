@@ -1090,10 +1090,16 @@ exports.getDeviceDataWithBucket = async (req, res) => {
       bucketLabel = '1 day';
       params = [deviceuid, start_date, end_date];
     } else {
+      // bucketSql = `
+      //   date_trunc('hour', "timestamp")
+      //   + floor(EXTRACT(epoch FROM "timestamp") / ($1 * 60)) * ($1 * interval '1 minute')
+      // `;
       bucketSql = `
-        date_trunc('hour', "timestamp")
-        + floor(EXTRACT(epoch FROM "timestamp") / ($1 * 60)) * ($1 * interval '1 minute')
+        to_timestamp(
+          floor(EXTRACT(epoch FROM "timestamp") / ($1 * 60)) * ($1 * 60)
+        )
       `;
+
       bucketLabel = `${parsedBucket} minutes`;
       params = [parsedBucket, deviceuid, start_date, end_date];
     }
