@@ -1,6 +1,6 @@
 const { Pool } = require('pg');
 const cron = require('node-cron');
-require('dotenv').config();
+require('dotenv').config({ path: __dirname + '/../.env' });
 
 const pgPool = new Pool({
   host: process.env.DB_HOST,
