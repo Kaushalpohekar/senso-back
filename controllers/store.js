@@ -2,7 +2,7 @@ const mqtt = require('mqtt');
 const { Pool } = require('pg');
 const os = require('os');
 
-const broker = 'ws://dashboard.senselive.in:9001';
+const broker = 'mqtt://dashboard.senselive.in:1883';
 const pgPool = new Pool({
   host: 'data.senselive.in',
   user: 'senselive',
